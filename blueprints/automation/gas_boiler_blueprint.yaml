@@ -1,0 +1,250 @@
+blueprint:
+  name: Gas Boiler Control
+  description: >
+    Controls a gas boiler based on radiator demand, bathroom humidity, and a
+    countdown timer. Additional condition: if the outdoor temperature exceeds
+    the configured threshold, the bathroom radiator is switched off.
+  domain: automation
+  input:
+    binary_sensor_boiler_demand:
+      name: Boiler demand sensor
+      description: Binary sensor indicating that radiators require heat.
+      selector:
+        entity:
+          domain: binary_sensor
+
+    sensor_valve_opening:
+      name: Radiator valve opening sensor
+      description: Sensor reporting the percentage opening of the radiator valve.
+      selector:
+        entity:
+          domain: sensor
+
+    valve_opening_threshold:
+      name: Valve opening threshold (%)
+      description: Minimum valve opening (%) above which the boiler should run.
+      default: 29
+      selector:
+        number:
+          min: 0
+          max: 100
+          unit_of_measurement: "%"
+
+    switch_boiler:
+      name: Boiler / bathroom radiator switch
+      description: Switch that controls the gas boiler or bathroom radiator.
+      selector:
+        entity:
+          domain: switch
+
+    timer_bathroom:
+      name: Bathroom radiator timer
+      description: Timer that counts down the bathroom radiator run time after high humidity is detected.
+      selector:
+        entity:
+          domain: timer
+
+    sensor_humidity:
+      name: Humidity sensor (bathroom)
+      description: Humidity sensor located in the bathroom.
+      selector:
+        entity:
+          domain: sensor
+          device_class: humidity
+
+    humidity_threshold_high:
+      name: High humidity threshold (%)
+      description: Above this value the bathroom radiator turns on automatically.
+      default: 65
+      selector:
+        number:
+          min: 0
+          max: 100
+          unit_of_measurement: "%"
+
+    humidity_threshold_optimal:
+      name: Optimal humidity threshold (%)
+      description: Below this value the bathroom radiator turns off automatically.
+      default: 30
+      selector:
+        number:
+          min: 0
+          max: 100
+          unit_of_measurement: "%"
+
+    timer_duration:
+      name: Timer duration (seconds)
+      description: How long the bathroom radiator should run after high humidity is detected.
+      default: 1200
+      selector:
+        number:
+          min: 60
+          max: 7200
+          unit_of_measurement: "s"
+
+    sensor_outdoor_temperature:
+      name: Outdoor temperature sensor
+      description: Temperature sensor located outside the building.
+      selector:
+        entity:
+          domain: sensor
+          device_class: temperature
+
+    outdoor_temperature_threshold:
+      name: Outdoor temperature threshold (°C)
+      description: >
+        If the outdoor temperature exceeds this value, the bathroom radiator is
+        switched off and the timer is cancelled (applies to humidity and timer triggers).
+      default: 18
+      selector:
+        number:
+          min: -20
+          max: 40
+          unit_of_measurement: "°C"
+
+triggers:
+  - minutes: /10
+    trigger: time_pattern
+    id: Every 10 minutes
+
+  - trigger: state
+    entity_id: !input binary_sensor_boiler_demand
+    to: "on"
+    id: Radiators turn boiler on
+
+  - trigger: state
+    entity_id: !input binary_sensor_boiler_demand
+    to: "off"
+    id: Radiators turn boiler off
+
+  - trigger: numeric_state
+    entity_id: !input sensor_humidity
+    above: !input humidity_threshold_high
+    id: Humidity too high
+
+  - trigger: numeric_state
+    entity_id: !input sensor_humidity
+    below: !input humidity_threshold_optimal
+    id: Humidity optimal
+
+  - trigger: event
+    event_type: timer.finished
+    event_data:
+      entity_id: !input timer_bathroom
+    id: Bathroom radiator timer finished
+
+conditions: []
+
+actions:
+  - choose:
+
+    # ── Every 10 minutes ──────────────────────────────────────────────────────
+    - conditions:
+      - condition: trigger
+        id: Every 10 minutes
+      sequence:
+      - if:
+        - condition: and
+          conditions:
+          - condition: numeric_state
+            entity_id: !input sensor_valve_opening
+            above: !input valve_opening_threshold
+          - condition: state
+            entity_id: !input binary_sensor_boiler_demand
+            state: "on"
+        then:
+        - action: switch.turn_on
+          target:
+            entity_id: !input switch_boiler
+        else:
+        - if:
+          - condition: state
+            entity_id: !input timer_bathroom
+            state: idle
+          then:
+          - action: switch.turn_off
+            target:
+              entity_id: !input switch_boiler
+
+    # ── Radiators – turn boiler on ────────────────────────────────────────────
+    - conditions:
+      - condition: trigger
+        id: Radiators turn boiler on
+      sequence:
+      - if:
+        - condition: and
+          conditions:
+          - condition: numeric_state
+            entity_id: !input sensor_valve_opening
+            above: !input valve_opening_threshold
+          - condition: state
+            entity_id: !input binary_sensor_boiler_demand
+            state: "on"
+        then:
+        - action: switch.turn_on
+          target:
+            entity_id: !input switch_boiler
+        else:
+        - action: switch.turn_off
+          target:
+            entity_id: !input switch_boiler
+
+    # ── Radiators – turn boiler off ───────────────────────────────────────────
+    - conditions:
+      - condition: trigger
+        id: Radiators turn boiler off
+      sequence:
+      - action: switch.turn_off
+        target:
+          entity_id: !input switch_boiler
+
+    # ── Humidity too high → turn on bathroom radiator (if not too warm outside) ─
+    - conditions:
+      - condition: trigger
+        id: Humidity too high
+      sequence:
+      - if:
+        - condition: numeric_state
+          entity_id: !input sensor_outdoor_temperature
+          below: !input outdoor_temperature_threshold
+        then:
+        - action: switch.turn_on
+          target:
+            entity_id: !input switch_boiler
+        - action: timer.start
+          data:
+            duration: !input timer_duration
+          target:
+            entity_id: !input timer_bathroom
+        else:
+        - action: switch.turn_off
+          target:
+            entity_id: !input switch_boiler
+        - action: timer.cancel
+          data: {}
+          target:
+            entity_id: !input timer_bathroom
+
+    # ── Humidity optimal → turn off bathroom radiator ─────────────────────────
+    - conditions:
+      - condition: trigger
+        id: Humidity optimal
+      sequence:
+      - action: switch.turn_off
+        target:
+          entity_id: !input switch_boiler
+      - action: timer.cancel
+        data: {}
+        target:
+          entity_id: !input timer_bathroom
+
+    # ── Timer finished → turn off bathroom radiator ───────────────────────────
+    - conditions:
+      - condition: trigger
+        id: Bathroom radiator timer finished
+      sequence:
+      - action: switch.turn_off
+        target:
+          entity_id: !input switch_boiler
+
+mode: single
